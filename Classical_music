@@ -1,29 +1,246 @@
 import argparse
 import random
 from typing import Dict, List, Optional, Sequence
+import wave
+import struct
+import os
+import math
 
-import numpy as np
+import tkinter as tk
+from tkinter import ttk, scrolledtext, messagebox
 
 
-NOTES = ["C", "D", "E", "F", "G", "A", "B"]
+NOTES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 NOTE_TO_INDEX = {note: idx for idx, note in enumerate(NOTES)}
 INDEX_TO_NOTE = {idx: note for note, idx in NOTE_TO_INDEX.items()}
 
+# Frequency mapping for notes (in Hz) - A4 is 440Hz standard, chromatic scale
+NOTE_FREQUENCIES = {
+    "C": 261.63,
+    "C#": 277.18,
+    "D": 293.66,
+    "D#": 311.13,
+    "E": 329.63,
+    "F": 349.23,
+    "F#": 369.99,
+    "G": 392.00,
+    "G#": 415.30,
+    "A": 440.00,
+    "A#": 466.16,
+    "B": 493.88,
+}
 
-def encode_window(window: Sequence[int]) -> np.ndarray:
-    return np.array(window, dtype=int)
+# Chord definitions (intervals in semitones from root)
+CHORDS = {
+    "major": [0, 4, 7],          # Root, Major 3rd, Perfect 5th
+    "minor": [0, 3, 7],          # Root, Minor 3rd, Perfect 5th
+    "major7": [0, 4, 7, 11],     # Major + Major 7th
+    "minor7": [0, 3, 7, 10],     # Minor + Minor 7th
+    "dim": [0, 3, 6],            # Diminished (Root, Minor 3rd, Diminished 5th)
+    "aug": [0, 4, 8],            # Augmented (Root, Major 3rd, Augmented 5th)
+    "sus2": [0, 2, 7],           # Suspended 2nd
+    "sus4": [0, 5, 7],           # Suspended 4th
+}
+
+
+def get_note_frequency(note_name: str) -> float:
+    """Get frequency for a note name (e.g., 'C', 'C#', 'Db')."""
+    note_name = note_name.upper()
+    if note_name in NOTE_FREQUENCIES:
+        return NOTE_FREQUENCIES[note_name]
+    # Handle flats (e.g., Db -> C#)
+    if len(note_name) == 2 and note_name[1] == 'B':
+        note_without_flat = note_name[0]
+        if note_without_flat in NOTE_TO_INDEX:
+            idx = NOTE_TO_INDEX[note_without_flat]
+            idx = (idx - 1) % len(NOTES)  # Go back one semitone
+            flat_note = INDEX_TO_NOTE[idx]
+            return NOTE_FREQUENCIES[flat_note]
+    raise ValueError(f"Unknown note: {note_name}")
+
+
+def build_chord(root_note: str, chord_type: str = "major") -> List[float]:
+    """Build a chord as a list of frequencies."""
+    if chord_type not in CHORDS:
+        raise ValueError(f"Unknown chord type: {chord_type}")
+    
+    root_freq = get_note_frequency(root_note)
+    root_idx = None
+    for note, idx in NOTE_TO_INDEX.items():
+        if NOTE_FREQUENCIES[note] == root_freq:
+            root_idx = idx
+            break
+    
+    if root_idx is None:
+        raise ValueError(f"Could not find root note: {root_note}")
+    
+    intervals = CHORDS[chord_type]
+    chord_frequencies = []
+    for interval in intervals:
+        note_idx = (root_idx + interval) % len(NOTES)
+        note = INDEX_TO_NOTE[note_idx]
+        chord_frequencies.append(NOTE_FREQUENCIES[note])
+    
+    return chord_frequencies
+
+
+def generate_chord_tone(frequencies: List[float], duration: float = 0.5, sample_rate: int = 44100, bpm: int = 120) -> bytes:
+    """Generate multiple frequencies played together (chord).
+    
+    Args:
+        frequencies: List of frequencies in Hz
+        duration: Base duration in seconds
+        sample_rate: Sample rate in Hz
+        bpm: Beats per minute (if > 0, overrides duration)
+    """
+    # Calculate duration from BPM if provided
+    if bpm > 0:
+        beat_duration = 60.0 / bpm
+        duration = beat_duration * 1.5  # Chords get 1.5x beat duration
+    
+    num_samples = int(duration * sample_rate)
+    samples = []
+    
+    for i in range(num_samples):
+        t = i / sample_rate
+        # Fade in/out to avoid clicks
+        fade_in_time = min(0.01, duration * 0.1)
+        fade_out_time = min(0.05, duration * 0.15)
+        envelope = 1.0
+        
+        if t < fade_in_time:
+            envelope = t / fade_in_time
+        elif t > duration - fade_out_time:
+            envelope = (duration - t) / fade_out_time
+        
+        # Sum all frequencies (average to avoid clipping)
+        value = 0.0
+        for freq in frequencies:
+            value += math.sin(2 * math.pi * freq * t)
+        value /= len(frequencies)
+        value *= envelope
+        
+        # Convert to 16-bit PCM
+        sample = int(value * 32767)
+        sample = max(-32768, min(32767, sample))
+        samples.append(struct.pack('<h', sample))
+    
+    return b''.join(samples)
+
+
+def generate_tone(frequency: float, duration: float = 0.3, sample_rate: int = 44100, bpm: int = 120) -> bytes:
+    """Generate a sine wave tone at the given frequency.
+    
+    Args:
+        frequency: Frequency in Hz
+        duration: Base duration in seconds (can be overridden by BPM)
+        sample_rate: Sample rate in Hz
+        bpm: Beats per minute (if > 0, overrides duration)
+    """
+    # Calculate duration from BPM if provided
+    if bpm > 0:
+        # Each note is a quarter note = 1 beat
+        beat_duration = 60.0 / bpm  # seconds per beat
+        duration = beat_duration
+    
+    num_samples = int(duration * sample_rate)
+    samples = []
+    
+    # Generate sine wave with amplitude envelope
+    for i in range(num_samples):
+        t = i / sample_rate
+        # Fade in/out to avoid clicks
+        fade_in_time = min(0.01, duration * 0.1)
+        fade_out_time = min(0.01, duration * 0.1)
+        envelope = 1.0
+        
+        if t < fade_in_time:
+            envelope = t / fade_in_time
+        elif t > duration - fade_out_time:
+            envelope = (duration - t) / fade_out_time
+        
+        # Sine wave
+        value = math.sin(2 * math.pi * frequency * t) * envelope
+        # Convert to 16-bit PCM
+        sample = int(value * 32767)
+        sample = max(-32768, min(32767, sample))  # Clamp to 16-bit range
+        samples.append(struct.pack('<h', sample))
+    
+    return b''.join(samples)
+
+
+
+
+
+def play_audio(audio_data: bytes, sample_rate: int = 44100) -> None:
+    """Play audio using Windows winsound (built-in)."""
+    try:
+        import winsound
+        import io
+        
+        # Create WAV file in memory
+        wav_buffer = io.BytesIO()
+        
+        # WAV header
+        num_channels = 1
+        sample_width = 2  # 16-bit
+        num_frames = len(audio_data) // sample_width
+        
+        # Write WAV header
+        wav_buffer.write(b'RIFF')
+        wav_buffer.write(struct.pack('<I', 36 + len(audio_data)))
+        wav_buffer.write(b'WAVE')
+        wav_buffer.write(b'fmt ')
+        wav_buffer.write(struct.pack('<I', 16))  # fmt chunk size
+        wav_buffer.write(struct.pack('<HHIIHH', 1, num_channels, sample_rate, 
+                                     sample_rate * num_channels * sample_width,
+                                     num_channels * sample_width, 16))
+        wav_buffer.write(b'data')
+        wav_buffer.write(struct.pack('<I', len(audio_data)))
+        wav_buffer.write(audio_data)
+        
+        # Save temp file and play
+        temp_file = "temp_sound.wav"
+        with open(temp_file, 'wb') as f:
+            f.write(wav_buffer.getvalue())
+        
+        winsound.PlaySound(temp_file, winsound.SND_FILENAME)
+        os.remove(temp_file)
+    except Exception as e:
+        print(f"Error playing audio: {e}")
+
+
+def play_notes(note_indices: List[int], bpm: int = 120) -> None:
+    """Play a sequence of notes with BPM control.
+    
+    Args:
+        note_indices: List of note indices
+        bpm: Beats per minute for tempo control
+    """
+    audio_data = b''
+    for note_idx in note_indices:
+        note = INDEX_TO_NOTE[note_idx]
+        frequency = NOTE_FREQUENCIES[note]
+        tone = generate_tone(frequency, bpm=bpm)
+        audio_data += tone
+    
+    play_audio(audio_data)
+
+
+def encode_window(window: Sequence[int]) -> List[int]:
+    return list(window)
 
 
 class Neuron:
     def __init__(self) -> None:
-        self.features: Optional[np.ndarray] = None
+        self.features: Optional[List[int]] = None
         self.probabilities: Dict[int, float] = {}
         self.occupied = False
 
-    def match(self, input_features: np.ndarray) -> bool:
+    def match(self, input_features: List[int]) -> bool:
         if self.features is None:
             return False
-        return np.array_equal(self.features, input_features)
+        return self.features == input_features
 
     def update_probability(self, class_label: int, success: bool = True) -> None:
         if class_label not in self.probabilities:
@@ -43,7 +260,7 @@ class MusicMemoryAI:
         self.window = window
         self.neurons = [Neuron() for _ in range(num_neurons)]
 
-    def train(self, input_features: np.ndarray, class_label: int) -> None:
+    def train(self, input_features: List[int], class_label: int) -> None:
         matched = False
 
         for neuron_instance in self.neurons:
@@ -60,14 +277,13 @@ class MusicMemoryAI:
                     neuron_instance.update_probability(class_label, success=True)
                     break
 
-    def predict(self, input_features: np.ndarray) -> Optional[int]:
+    def predict(self, input_features: List[int]) -> Optional[int]:
         votes: Dict[int, float] = {}
         for neuron_instance in self.neurons:
             if neuron_instance.features is None:
                 continue
-            similarity = np.sum(neuron_instance.features == input_features) / len(
-                input_features
-            )
+            similarity = sum(1 for i in range(len(input_features)) 
+                           if input_features[i] == neuron_instance.features[i]) / len(input_features)
             if similarity == 0:
                 continue
             for class_label, prob in neuron_instance.probabilities.items():
@@ -90,18 +306,34 @@ class MusicMemoryAI:
 
 
 def build_training_corpus() -> List[List[int]]:
-    scale_up = [0, 1, 2, 3, 4, 5, 6]
+    # Chromatic scale (all 12 semitones)
+    scale_up = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     scale_down = list(reversed(scale_up))
-    arpeggio = [0, 2, 4, 2, 0, 2, 4, 2]
-    cadence = [4, 3, 2, 1, 0, 4, 3, 2, 1, 0]
-    simple_motif = [0, 1, 0, 2, 0, 3, 0, 4]
+    
+    # Chromatic arpeggio
+    arpeggio = [0, 2, 4, 6, 4, 2, 0, 2, 4, 6, 4, 2]
+    
+    # Blues scale pattern (common in many genres)
+    blues_pattern = [0, 3, 5, 6, 7, 10, 0, 3, 5, 6, 7, 10]
+    
+    # Chord progressions (I-IV-V-I in C major)
+    # C major (0,4,7) -> F major (5,9,0) -> G major (7,11,2) -> C major (0,4,7)
+    chord_progression = [0, 4, 7, 5, 9, 0, 7, 11, 2, 0, 4, 7]
+    
+    # Minor descending
+    minor_motif = [0, 11, 9, 8, 7, 5, 4, 3, 2, 1, 0]
+    
+    # Pentatonic (5-note scale)
+    pentatonic = [0, 2, 4, 7, 9, 0, 2, 4, 7, 9]
 
     return [
         scale_up * 2,
         scale_down * 2,
         arpeggio,
-        cadence,
-        simple_motif,
+        blues_pattern,
+        chord_progression,
+        minor_motif,
+        pentatonic,
     ]
 
 
@@ -121,33 +353,357 @@ def parse_seed(seed_notes: str, window: int) -> List[int]:
     return [NOTE_TO_INDEX[token] for token in tokens]
 
 
+def generate_random_seed(count: int, window: int) -> List[int]:
+    """Generate a random seed of specified length."""
+    return [random.randint(0, len(NOTES)-1) for _ in range(count)]
+
+
+def chord_progression_to_notes(chord_sequence: List[tuple]) -> List[int]:
+    """Convert a sequence of (root, chord_type) tuples to note indices.
+    
+    Example: [('C', 'major'), ('F', 'major'), ('G', 'major'), ('C', 'major')]
+    """
+    notes = []
+    for root, chord_type in chord_sequence:
+        chord_freqs = build_chord(root, chord_type)
+        # Get note indices for the chord
+        root_idx = NOTE_TO_INDEX[root]
+        for interval in CHORDS[chord_type]:
+            note_idx = (root_idx + interval) % len(NOTES)
+            notes.append(note_idx)
+    return notes
+
+
 def format_notes(notes: Sequence[int]) -> str:
     return " ".join(INDEX_TO_NOTE[note] for note in notes)
 
 
+def detect_chord_type(note_indices: List[int]) -> str:
+    """Detect chord type from a set of note indices."""
+    if len(note_indices) < 2:
+        return "major"
+    
+    # Calculate intervals from first note
+    intervals = []
+    first = note_indices[0]
+    for note in note_indices[1:]:
+        interval = (note - first) % len(NOTES)
+        intervals.append(interval)
+    
+    intervals = sorted(set(intervals))  # Get unique intervals
+    
+    # Match against known chord patterns
+    for chord_type, chord_intervals in CHORDS.items():
+        # Check if intervals match any chord pattern
+        if len(intervals) >= len(chord_intervals) - 1:
+            match = True
+            for required_interval in chord_intervals[1:]:  # Skip root
+                if required_interval not in intervals:
+                    match = False
+                    break
+            if match:
+                return chord_type
+    
+    return "major"  # Default
+
+
+def generate_chord_progression_from_seed(generated_notes: List[int], chord_interval: int = 4) -> List[tuple]:
+    """Generate a chord progression from generated notes.
+    
+    Args:
+        generated_notes: List of note indices
+        chord_interval: How many notes apart to pick chord roots
+    
+    Returns:
+        List of (root_note, chord_type) tuples
+    """
+    chord_progression = []
+    
+    # Extract chord roots at intervals
+    for i in range(0, len(generated_notes), chord_interval):
+        root_idx = generated_notes[i]
+        root_note = INDEX_TO_NOTE[root_idx]
+        
+        # Get next few notes to determine chord type
+        chord_notes = generated_notes[i:i + chord_interval]
+        chord_type = detect_chord_type(chord_notes)
+        
+        chord_progression.append((root_note, chord_type))
+    
+    return chord_progression
+
+
+def play_chord_progression_from_notes(generated_notes: List[int], chord_interval: int = 4, bpm: int = 120) -> bytes:
+    """Generate audio for chord progression derived from notes.
+    
+    Args:
+        generated_notes: List of note indices
+        chord_interval: How many notes apart to pick chord roots
+        bpm: Beats per minute for tempo control
+    """
+    chord_progression = generate_chord_progression_from_seed(generated_notes, chord_interval)
+    
+    audio_data = b''
+    for root, chord_type in chord_progression:
+        try:
+            frequencies = build_chord(root, chord_type)
+            chord_audio = generate_chord_tone(frequencies, bpm=bpm)
+            audio_data += chord_audio
+        except:
+            pass
+    
+    return audio_data
+
+
+class MusicAIGUI:
+    def __init__(self, root: tk.Tk) -> None:
+        self.root = root
+        self.root.title("Music Memory AI Generator - Chromatic with Chords")
+        self.root.geometry("850x800")
+        
+        # Initialize AI
+        self.ai = MusicMemoryAI(num_neurons=256, window=4)
+        corpus = build_training_corpus()
+        train_model(self.ai, corpus)
+        
+        self.last_generated_notes: List[int] = []
+        
+        # Create UI elements
+        self.create_widgets()
+    
+    def create_widgets(self) -> None:
+        # Main frame
+        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        # Title
+        title_label = ttk.Label(main_frame, text="Music Memory AI Generator (Chromatic)", font=("Arial", 14, "bold"))
+        title_label.grid(row=0, column=0, columnspan=3, pady=10)
+        
+        # Seed notes input
+        ttk.Label(main_frame, text="Seed Notes (comma-separated):").grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.seed_entry = ttk.Entry(main_frame, width=30)
+        self.seed_entry.grid(row=1, column=1, sticky=(tk.W, tk.E), padx=5)
+        self.seed_entry.insert(0, "C,C#,D,D#")
+        
+        # Random seed button
+        random_seed_btn = ttk.Button(main_frame, text="Random Seed", command=self.random_seed)
+        random_seed_btn.grid(row=1, column=2, padx=5)
+        
+        # Random seed count input
+        ttk.Label(main_frame, text="Random Seed Count:").grid(row=2, column=0, sticky=tk.W, pady=5)
+        self.random_count_entry = ttk.Entry(main_frame, width=30)
+        self.random_count_entry.grid(row=2, column=1, sticky=(tk.W, tk.E), padx=5)
+        self.random_count_entry.insert(0, "4")
+        
+        # Length input
+        ttk.Label(main_frame, text="Number of Notes to Generate:").grid(row=3, column=0, sticky=tk.W, pady=5)
+        self.length_entry = ttk.Entry(main_frame, width=30)
+        self.length_entry.grid(row=3, column=1, sticky=(tk.W, tk.E), padx=5)
+        self.length_entry.insert(0, "16")
+        
+        # Window size input
+        ttk.Label(main_frame, text="Context Window Size:").grid(row=4, column=0, sticky=tk.W, pady=5)
+        self.window_entry = ttk.Entry(main_frame, width=30)
+        self.window_entry.grid(row=4, column=1, sticky=(tk.W, tk.E), padx=5)
+        self.window_entry.insert(0, "4")
+        
+        # Chord interval input
+        ttk.Label(main_frame, text="Chord Interval:").grid(row=5, column=0, sticky=tk.W, pady=5)
+        self.chord_interval_entry = ttk.Entry(main_frame, width=30)
+        self.chord_interval_entry.grid(row=5, column=1, sticky=(tk.W, tk.E), padx=5)
+        self.chord_interval_entry.insert(0, "3")
+        
+        # BPM / Tempo input
+        ttk.Label(main_frame, text="BPM (Tempo):").grid(row=6, column=0, sticky=tk.W, pady=5)
+        self.bpm_entry = ttk.Entry(main_frame, width=30)
+        self.bpm_entry.grid(row=6, column=1, sticky=(tk.W, tk.E), padx=5)
+        self.bpm_entry.insert(0, "120")
+        
+        # Chord root selector
+        ttk.Label(main_frame, text="Chord Root Note:").grid(row=7, column=0, sticky=tk.W, pady=5)
+        self.chord_root_var = tk.StringVar(value="C")
+        chord_root_combo = ttk.Combobox(main_frame, textvariable=self.chord_root_var, 
+                                        values=NOTES, state="readonly", width=28)
+        chord_root_combo.grid(row=7, column=1, sticky=(tk.W, tk.E), padx=5)
+        
+        # Chord type selector
+        ttk.Label(main_frame, text="Chord Type:").grid(row=8, column=0, sticky=tk.W, pady=5)
+        self.chord_type_var = tk.StringVar(value="major")
+        chord_type_combo = ttk.Combobox(main_frame, textvariable=self.chord_type_var,
+                                        values=list(CHORDS.keys()), state="readonly", width=28)
+        chord_type_combo.grid(row=8, column=1, sticky=(tk.W, tk.E), padx=5)
+        
+        
+        # Generate button
+        generate_btn = ttk.Button(main_frame, text="Generate Music", command=self.generate)
+        generate_btn.grid(row=9, column=0, pady=10)
+        
+        # Play button
+        play_btn = ttk.Button(main_frame, text="Play Music", command=self.play)
+        play_btn.grid(row=9, column=1, pady=10, padx=5)
+        
+        # Play chord button
+        chord_btn = ttk.Button(main_frame, text="Play Chord", command=self.play_chord)
+        chord_btn.grid(row=9, column=2, pady=10, padx=5)
+        
+        # Play chord progression button (from seed)
+        chord_prog_btn = ttk.Button(main_frame, text="Play Chord Progression\n(from seed)", command=self.play_chord_progression_auto)
+        chord_prog_btn.grid(row=10, column=0, columnspan=3, pady=5)
+        
+        # Output box
+        ttk.Label(main_frame, text="Output:").grid(row=11, column=0, columnspan=3, sticky=tk.W, pady=(10, 5))
+        self.output_box = scrolledtext.ScrolledText(main_frame, height=10, width=80)
+        self.output_box.grid(row=12, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
+        self.output_box.config(state=tk.DISABLED)
+    
+    def generate(self) -> None:
+        try:
+            seed_str = self.seed_entry.get()
+            length = int(self.length_entry.get())
+            window = int(self.window_entry.get())
+            chord_interval = int(self.chord_interval_entry.get())
+            
+            # Recreate AI with new window size if needed
+            if window != self.ai.window:
+                self.ai = MusicMemoryAI(num_neurons=256, window=window)
+                corpus = build_training_corpus()
+                train_model(self.ai, corpus)
+            
+            # Parse seed and generate
+            seed = parse_seed(seed_str, window)
+            generated = self.ai.generate(seed, length)
+            self.last_generated_notes = generated
+            
+            # Detect chord progression from generated notes
+            chord_progression = generate_chord_progression_from_seed(generated, chord_interval)
+            chord_names = [f"{root}{chord_type[0].upper()}" for root, chord_type in chord_progression]
+            
+            # Display output
+            output_text = f"Seed: {format_notes(seed)}\n"
+            output_text += f"Generated: {format_notes(generated)}\n"
+            output_text += f"\nDetected Chord Progression (interval={chord_interval}):\n"
+            output_text += f"{' → '.join(chord_names)}\n"
+            output_text += f"\nFull Progression: {', '.join([f'{root} {chord_type}' for root, chord_type in chord_progression])}\n"
+            
+            self.output_box.config(state=tk.NORMAL)
+            self.output_box.delete(1.0, tk.END)
+            self.output_box.insert(tk.END, output_text)
+            self.output_box.config(state=tk.DISABLED)
+        
+        except ValueError as e:
+            messagebox.showerror("Error", f"Invalid input: {e}")
+        except Exception as e:
+            messagebox.showerror("Error", f"An error occurred: {e}")
+    
+    def play(self) -> None:
+        """Play the last generated music sequence with BPM control."""
+        if not self.last_generated_notes:
+            messagebox.showwarning("Warning", "Please generate music first before playing.")
+            return
+        
+        try:
+            bpm = int(self.bpm_entry.get())
+            if bpm <= 0:
+                messagebox.showerror("Error", "BPM must be greater than 0.")
+                return
+            play_notes(self.last_generated_notes, bpm=bpm)
+        except ValueError:
+            messagebox.showerror("Error", "BPM must be a valid integer.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to play audio: {e}")
+    
+    def play_chord(self) -> None:
+        """Play a chord based on selected root and type."""
+        try:
+            root = self.chord_root_var.get()
+            chord_type = self.chord_type_var.get()
+            bpm = int(self.bpm_entry.get())
+            
+            if bpm <= 0:
+                messagebox.showerror("Error", "BPM must be greater than 0.")
+                return
+            
+            frequencies = build_chord(root, chord_type)
+            audio_data = generate_chord_tone(frequencies, bpm=bpm)
+            play_audio(audio_data)
+            
+            # Display chord info
+            chord_notes = []
+            root_idx = NOTE_TO_INDEX[root]
+            for interval in CHORDS[chord_type]:
+                note_idx = (root_idx + interval) % len(NOTES)
+                chord_notes.append(INDEX_TO_NOTE[note_idx])
+            
+            self.output_box.config(state=tk.NORMAL)
+            self.output_box.insert(tk.END, f"\n{root} {chord_type}: {', '.join(chord_notes)}")
+            self.output_box.config(state=tk.DISABLED)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to play chord: {e}")
+    
+    def random_seed(self) -> None:
+        """Generate a random seed with specified count."""
+        try:
+            count = int(self.random_count_entry.get())
+            if count <= 0:
+                messagebox.showerror("Error", "Random seed count must be greater than 0.")
+                return
+            
+            random_notes = generate_random_seed(count, 0)
+            random_note_names = [INDEX_TO_NOTE[note] for note in random_notes]
+            seed_str = ",".join(random_note_names)
+            
+            # Update the seed entry field
+            self.seed_entry.delete(0, tk.END)
+            self.seed_entry.insert(0, seed_str)
+            
+            # Display in output
+            self.output_box.config(state=tk.NORMAL)
+            self.output_box.delete(1.0, tk.END)
+            self.output_box.insert(tk.END, f"Random Seed Generated ({count} notes):\n{seed_str}\n")
+            self.output_box.config(state=tk.DISABLED)
+        except ValueError:
+            messagebox.showerror("Error", "Random seed count must be a valid integer.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to generate random seed: {e}")
+    
+    def play_chord_progression_auto(self) -> None:
+        """Play chord progression automatically derived from generated seed."""
+        if not self.last_generated_notes:
+            messagebox.showwarning("Warning", "Please generate music first before playing chord progression.")
+            return
+        
+        try:
+            chord_interval = int(self.chord_interval_entry.get())
+            bpm = int(self.bpm_entry.get())
+            
+            if bpm <= 0:
+                messagebox.showerror("Error", "BPM must be greater than 0.")
+                return
+            
+            # Generate audio for chord progression with BPM
+            audio_data = play_chord_progression_from_notes(self.last_generated_notes, chord_interval, bpm=bpm)
+            play_audio(audio_data)
+            
+            # Display chord info
+            chord_progression = generate_chord_progression_from_seed(self.last_generated_notes, chord_interval)
+            chord_names = [f"{root}{chord_type[0].upper()}" for root, chord_type in chord_progression]
+            
+            self.output_box.config(state=tk.NORMAL)
+            self.output_box.insert(tk.END, f"\n\nPlaying Chord Progression @ {bpm} BPM: {' → '.join(chord_names)}\n")
+            self.output_box.config(state=tk.DISABLED)
+        except ValueError:
+            messagebox.showerror("Error", "Chord interval must be a valid integer.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to play chord progression: {e}")
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Generate a simple classical-style melody using a memory-based AI."
-    )
-    parser.add_argument("--length", type=int, default=16, help="Notes to generate.")
-    parser.add_argument(
-        "--seed",
-        type=str,
-        default="C,D,E,F",
-        help="Comma-separated seed notes (e.g. C,D,E,F).",
-    )
-    parser.add_argument("--window", type=int, default=4, help="Context window size.")
-    args = parser.parse_args()
-
-    ai = MusicMemoryAI(num_neurons=256, window=args.window)
-    corpus = build_training_corpus()
-    train_model(ai, corpus)
-
-    seed = parse_seed(args.seed, args.window)
-    generated = ai.generate(seed, args.length)
-    print("Seed:", format_notes(seed))
-    print("Generated:", format_notes(generated))
+    root = tk.Tk()
+    gui = MusicAIGUI(root)
+    root.mainloop()
 
 
 if __name__ == "__main__":
     main()
+
